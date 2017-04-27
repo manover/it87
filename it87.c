@@ -73,12 +73,8 @@
 #include <linux/dmi.h>
 #include <linux/acpi.h>
 #include <linux/io.h>
-#include "compat.h"
 
 #define DRVNAME "it87"
-
-/* Necessary API not (yet) exported in upstream kernel */
-/* #define __IT87_USE_ACPI_MUTEX */
 
 enum chips { it87, it8712, it8716, it8718, it8720, it8721, it8728, it8732,
 	     it8771, it8772, it8781, it8782, it8783, it8786, it8790,
@@ -96,7 +92,7 @@ MODULE_PARM_DESC(blacklist,
 
 static struct platform_device *it87_pdev[2];
 static bool it87_sio4e_broken;
-#ifdef __IT87_USE_ACPI_MUTEX
+#ifdef CONFIG_SENSORS_IT87_USE_ACPI_MUTEX
 static acpi_handle it87_acpi_sio_handle;
 static char *it87_acpi_sio_mutex;
 #endif
@@ -156,7 +152,7 @@ static inline void superio_select(int ioreg, int ldn)
 
 static inline int superio_enter(int ioreg)
 {
-#ifdef __IT87_USE_ACPI_MUTEX
+#ifdef CONFIG_SENSORS_IT87_USE_ACPI_MUTEX
 	if (it87_acpi_sio_mutex) {
 		acpi_status status;
 
@@ -177,7 +173,7 @@ static inline int superio_enter(int ioreg)
 	return 0;
 
 error:
-#ifdef __IT87_USE_ACPI_MUTEX
+#ifdef CONFIG_SENSORS_IT87_USE_ACPI_MUTEX
 	if (it87_acpi_sio_mutex)
 		acpi_release_mutex(it87_acpi_sio_handle, NULL);
 #endif
@@ -191,7 +187,7 @@ static inline void superio_exit(int ioreg)
 		outb(0x02, ioreg + 1);
 	}
 	release_region(ioreg, 2);
-#ifdef __IT87_USE_ACPI_MUTEX
+#ifdef CONFIG_SENSORS_IT87_USE_ACPI_MUTEX
 	if (it87_acpi_sio_mutex)
 		acpi_release_mutex(it87_acpi_sio_handle, NULL);
 #endif
@@ -3397,11 +3393,9 @@ exit:
 	return err;
 }
 
-static void it87_init_regs(struct platform_device *pdev)
+/* Initialize chip specific register pointers */
+static void it87_init_regs(struct it87_data *data)
 {
-	struct it87_data *data = platform_get_drvdata(pdev);
-
-	/* Initialize chip specific register pointers */
 	switch (data->type) {
 	case it8628:
 	case it8686:
@@ -3608,39 +3602,33 @@ static int it87_check_pwm(struct device *dev)
 			 */
 			int i;
 			u8 pwm[3];
+			u8 mode = 0;
 
 			for (i = 0; i < ARRAY_SIZE(pwm); i++)
-				pwm[i] = it87_read_value(data,
-							 data->REG_PWM[i]);
-
+				mode |= (pwm[i] = it87_read_value(data, data->REG_PWM[i]));
 			/*
 			 * If any fan is in automatic pwm mode, the polarity
 			 * might be correct, as suspicious as it seems, so we
 			 * better don't change anything (but still disable the
 			 * PWM interface).
 			 */
-			if (!((pwm[0] | pwm[1] | pwm[2]) & 0x80)) {
-				dev_info(dev,
-					 "Reconfiguring PWM to active high polarity\n");
-				it87_write_value(data, IT87_REG_FAN_CTL,
-						 tmp | 0x87);
-				for (i = 0; i < 3; i++)
-					it87_write_value(data,
-							 data->REG_PWM[i],
-							 0x7f & ~pwm[i]);
+			if (!(mode & 0x80)) {
+				dev_info(dev, "Reconfiguring PWM to active high polarity\n");
+
+				it87_write_value(data, IT87_REG_FAN_CTL, tmp | 0x87);
+
+				for (i = 0; ARRAY_SIZE(pwm); i++)
+					it87_write_value(data, data->REG_PWM[i], 0x7f & ~pwm[i]);
 				return 1;
 			}
+			dev_info(dev, "PWM configuration is too broken to be fixed\n");
 
-			dev_info(dev,
-				 "PWM configuration is too broken to be fixed\n");
 		}
-
-		dev_info(dev,
-			 "Detected broken BIOS defaults, disabling PWM interface\n");
+		dev_info(dev, "Detected broken BIOS defaults, disabling PWM interface\n");
 		return 0;
+
 	} else if (fix_pwm_polarity) {
-		dev_info(dev,
-			 "PWM configuration looks sane, won't touch\n");
+		dev_info(dev, "PWM configuration looks sane, won't touch\n");
 	}
 
 	return 1;
@@ -3710,7 +3698,7 @@ static int it87_probe(struct platform_device *pdev)
 	mutex_init(&data->update_lock);
 
 	/* Initialize register pointers */
-	it87_init_regs(pdev);
+	it87_init_regs(data);
 
 	/* Check PWM configuration */
 	enable_pwm_interface = it87_check_pwm(dev);
@@ -3829,8 +3817,7 @@ static int __init it87_device_add(int index, unsigned short address,
 		goto exit_device_put;
 	}
 
-	err = platform_device_add_data(pdev, sio_data,
-				       sizeof(struct it87_sio_data));
+	err = platform_device_add_data(pdev, sio_data, sizeof(struct it87_sio_data));
 	if (err) {
 		pr_err("Platform data allocation failed\n");
 		goto exit_device_put;
@@ -3878,6 +3865,16 @@ static struct it87_dmi_data nvidia_fn68pt = {
 	.skip_pwm = BIT(1),
 };
 
+static struct it87_dmi_data gigabyte_z87x = {
+	.sio_mutex = "\\_SB.PCI0.LPCB.SIO1.MUT0",
+};
+
+#ifdef CONFIG_SENSORS_IT87_ACPI_MUTEX_CUSTOM_PATH
+static struct it87_dmi_data custom_driver_data = {
+	.sio_mutex = CONFIG_SENSORS_IT87_ACPI_MUTEX_CUSTOM_PATH,
+};
+#endif
+
 static const struct dmi_system_id it87_dmi_table[] __initconst = {
 	{
 		.matches = {
@@ -3916,10 +3913,32 @@ static const struct dmi_system_id it87_dmi_table[] __initconst = {
 	},
 	{
 		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Gigabyte Technology Co., Ltd."),
+			DMI_MATCH(DMI_BOARD_NAME, "Z87X-D3H"),
+		},
+		.driver_data = &gigabyte_z87x,
+	},
+	{
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Gigabyte Technology Co., Ltd."),
+			DMI_MATCH(DMI_BOARD_NAME, "Z87X-D3H-CF"),
+		},
+		.driver_data = &gigabyte_z87x,
+	},
+	{
+		.matches = {
 			DMI_MATCH(DMI_BOARD_VENDOR, "nVIDIA"),
 			DMI_MATCH(DMI_BOARD_NAME, "FN68PT"),
 		},
 		.driver_data = &nvidia_fn68pt,
+	},
+	{
+		.matches = {
+			DMI_MATCH(DMI_PRODUCT_NAME, "Milstead Platform"),
+			DMI_MATCH(DMI_BOARD_VERSION, "FABA"),
+			DMI_MATCH(DMI_BIOS_VENDOR, "Phoenix Technologies Ltd."),
+			DMI_MATCH(DMI_BIOS_VERSION, "CDV_T30 X64"),
+		},
 	},
 	{ }
 };
@@ -3927,7 +3946,11 @@ static const struct dmi_system_id it87_dmi_table[] __initconst = {
 static int __init sm_it87_init(void)
 {
 	const struct dmi_system_id *dmi = dmi_first_match(it87_dmi_table);
+#ifdef CONFIG_SENSORS_IT87_ACPI_MUTEX_CUSTOM_PATH
+	struct it87_dmi_data *dmi_data = &custom_driver_data;
+#else
 	struct it87_dmi_data *dmi_data = NULL;
+#endif
 	int sioaddr[2] = { REG_2E, REG_4E };
 	struct it87_sio_data sio_data;
 	unsigned short isa_address;
@@ -3939,22 +3962,19 @@ static int __init sm_it87_init(void)
 
 	if (dmi_data) {
 		it87_sio4e_broken = dmi_data->sio4e_broken;
-#ifdef __IT87_USE_ACPI_MUTEX
+#ifdef CONFIG_SENSORS_IT87_USE_ACPI_MUTEX
 		if (dmi_data->sio_mutex) {
 			static acpi_status status;
 
-			status = acpi_get_handle(NULL, dmi_data->sio_mutex,
-						 &it87_acpi_sio_handle);
+			status = acpi_get_handle(NULL, dmi_data->sio_mutex, &it87_acpi_sio_handle);
 			if (ACPI_SUCCESS(status)) {
 				it87_acpi_sio_mutex = dmi_data->sio_mutex;
-				pr_debug("Found ACPI SIO mutex %s\n",
-					 dmi_data->sio_mutex);
+				pr_debug("Found ACPI SIO mutex %s\n", dmi_data->sio_mutex);
 			} else {
-				pr_warn("ACPI SIO mutex %s not found\n",
-					dmi_data->sio_mutex);
+				pr_warn("ACPI SIO mutex %s not found\n", dmi_data->sio_mutex);
 			}
 		}
-#endif /* __IT87_USE_ACPI_MUTEX */
+#endif /* CONFIG_SENSORS_IT87_USE_ACPI_MUTEX */
 	}
 
 	err = platform_driver_register(&it87_driver);
@@ -3968,6 +3988,7 @@ static int __init sm_it87_init(void)
 		 */
 		if (blacklist && it87_sio4e_broken && sioaddr[i] == 0x4e)
 			continue;
+
 		memset(&sio_data, 0, sizeof(struct it87_sio_data));
 		isa_address = 0;
 		err = it87_find(sioaddr[i], &isa_address, &sio_data);
@@ -4004,6 +4025,7 @@ static void __exit sm_it87_exit(void)
 	platform_driver_unregister(&it87_driver);
 }
 
+MODULE_DEVICE_TABLE(dmi, it87_dmi_table);
 MODULE_AUTHOR("Chris Gauthron, Jean Delvare <jdelvare@suse.de>");
 MODULE_DESCRIPTION("IT8705F/IT871xF/IT872xF hardware monitoring driver");
 module_param(update_vbat, bool, 0);

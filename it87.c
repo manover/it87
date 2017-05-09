@@ -93,8 +93,7 @@ MODULE_PARM_DESC(blacklist,
 static struct platform_device *it87_pdev[2];
 static bool it87_sio4e_broken;
 #ifdef CONFIG_SENSORS_IT87_USE_ACPI_MUTEX
-static acpi_handle it87_acpi_sio_handle;
-static char *it87_acpi_sio_mutex;
+static acpi_handle acpi_sio_mutex;
 #endif
 
 #define	REG_2E	0x2e	/* The register to read/write */
@@ -153,10 +152,10 @@ static inline void superio_select(int ioreg, int ldn)
 static inline int superio_enter(int ioreg)
 {
 #ifdef CONFIG_SENSORS_IT87_USE_ACPI_MUTEX
-	if (it87_acpi_sio_mutex) {
+	if (acpi_sio_mutex) {
 		acpi_status status;
 
-		status = acpi_acquire_mutex(NULL, it87_acpi_sio_mutex, 0x10);
+		status = acpi_acquire_mutex(acpi_sio_mutex, NULL, 0x10);
 		if (ACPI_FAILURE(status)) {
 			pr_err("Failed to acquire ACPI mutex\n");
 			return -EBUSY;
@@ -174,8 +173,8 @@ static inline int superio_enter(int ioreg)
 
 error:
 #ifdef CONFIG_SENSORS_IT87_USE_ACPI_MUTEX
-	if (it87_acpi_sio_mutex)
-		acpi_release_mutex(it87_acpi_sio_handle, NULL);
+	if (acpi_sio_mutex)
+		acpi_release_mutex(acpi_sio_mutex, NULL);
 #endif
 	return -EBUSY;
 }
@@ -188,8 +187,8 @@ static inline void superio_exit(int ioreg)
 	}
 	release_region(ioreg, 2);
 #ifdef CONFIG_SENSORS_IT87_USE_ACPI_MUTEX
-	if (it87_acpi_sio_mutex)
-		acpi_release_mutex(it87_acpi_sio_handle, NULL);
+	if (acpi_sio_mutex)
+		acpi_release_mutex(acpi_sio_mutex, NULL);
 #endif
 }
 
@@ -3966,11 +3965,11 @@ static int __init sm_it87_init(void)
 		if (dmi_data->sio_mutex) {
 			static acpi_status status;
 
-			status = acpi_get_handle(NULL, dmi_data->sio_mutex, &it87_acpi_sio_handle);
+			status = acpi_get_handle(NULL, dmi_data->sio_mutex, &acpi_sio_mutex);
 			if (ACPI_SUCCESS(status)) {
-				it87_acpi_sio_mutex = dmi_data->sio_mutex;
 				pr_debug("Found ACPI SIO mutex %s\n", dmi_data->sio_mutex);
 			} else {
+				acpi_sio_mutex = NULL;
 				pr_warn("ACPI SIO mutex %s not found\n", dmi_data->sio_mutex);
 			}
 		}
@@ -4031,8 +4030,7 @@ MODULE_DESCRIPTION("IT8705F/IT871xF/IT872xF hardware monitoring driver");
 module_param(update_vbat, bool, 0);
 MODULE_PARM_DESC(update_vbat, "Update vbat if set else return powerup value");
 module_param(fix_pwm_polarity, bool, 0);
-MODULE_PARM_DESC(fix_pwm_polarity,
-		 "Force PWM polarity to active high (DANGEROUS)");
+MODULE_PARM_DESC(fix_pwm_polarity, "Force PWM polarity to active high (DANGEROUS)");
 MODULE_LICENSE("GPL");
 
 module_init(sm_it87_init);

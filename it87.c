@@ -102,19 +102,14 @@ static acpi_handle acpi_sio_mutex;
 #define	DEV	0x07	/* Register: Logical device select */
 #define PME	0x04	/* The device with the fan registers in it */
 
+#define IS_REG(R, x)		(x == REG_##R)
+#define IS_NOT_REG(R, x)	(x != REG_##R)
+
 /* The device with the IT8718F/IT8720F VID value in it */
 #define GPIO	0x07
 
 #define	DEVID	0x20	/* Register: Device ID */
 #define	DEVREV	0x22	/* Register: Device Revision */
-
-static inline void __superio_enter(int ioreg)
-{
-	outb(0x87, ioreg);
-	outb(0x01, ioreg);
-	outb(0x55, ioreg);
-	outb(ioreg == REG_4E ? 0xaa : 0x55, ioreg);
-}
 
 static inline int superio_inb(int ioreg, int reg)
 {
@@ -122,8 +117,16 @@ static inline int superio_inb(int ioreg, int reg)
 
 	outb(reg, ioreg);
 	val = inb(ioreg + 1);
-	if (it87_sio4e_broken && ioreg == 0x4e && val == 0xff) {
-		__superio_enter(ioreg);
+
+	if (it87_sio4e_broken && IS_REG(4E, ioreg) && val == 0xff) {
+		/* Garbage response on sio4e broken device, try to
+		 * re-enter */
+		outb(0x87, ioreg);
+		outb(0x01, ioreg);
+		outb(0x55, ioreg);
+		outb(0xaa, ioreg);
+
+		/* and re-read */
 		outb(reg, ioreg);
 		val = inb(ioreg + 1);
 		pr_warn("Retry access 0x4e:0x%x -> 0x%x\n", reg, val);
@@ -168,7 +171,11 @@ static inline int superio_enter(int ioreg)
 	if (!request_muxed_region(ioreg, 2, DRVNAME))
 		goto error;
 
-	__superio_enter(ioreg);
+	outb(0x87, ioreg);
+	outb(0x01, ioreg);
+	outb(0x55, ioreg);
+	outb(IS_REG(4E, ioreg) ? 0xaa : 0x55, ioreg);
+
 	return 0;
 
 error:
@@ -181,7 +188,7 @@ error:
 
 static inline void superio_exit(int ioreg)
 {
-	if (!it87_sio4e_broken || ioreg != 0x4e) {
+	if (!it87_sio4e_broken || IS_NOT_REG(4E, ioreg)) {
 		outb(0x02, ioreg);
 		outb(0x02, ioreg + 1);
 	}
@@ -3985,7 +3992,7 @@ static int __init sm_it87_init(void)
 		 * Accessing the second Super-IO chip can result in board
 		 * hangs. Disable until we figure out what is going on.
 		 */
-		if (blacklist && it87_sio4e_broken && sioaddr[i] == 0x4e)
+		if (blacklist && it87_sio4e_broken && IS_REG(4E, sioaddr[i]))
 			continue;
 
 		memset(&sio_data, 0, sizeof(struct it87_sio_data));
